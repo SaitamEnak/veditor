@@ -1,0 +1,10 @@
+node_modules
+dist
+*.log
+
+# Datos locales: proyectos, medios, exportaciones, capturas, papelera.
+# Sólo se versiona la carpeta de proyectos vacía.
+data/*
+!data/projects/
+data/projects/*
+!data/projects/.gitkeep
