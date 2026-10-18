@@ -4,7 +4,7 @@ import {
   Video, Volume2, VolumeX, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import type { Asset, Clip, MediaClip, Track } from '../../shared/types';
-import { clipEnd, isMediaClip, isTextClip, projectDuration } from '../../shared/types';
+import { clipEnd, isMediaClip, isShapeClip, isTextClip, keyframesOf, projectDuration } from '../../shared/types';
 import { MIN_CLIP, findClip, nearestFreeStart, neighbours, trackAccepts } from '../lib/ops';
 import { formatTime } from '../lib/util';
 import { useEditor } from '../store';
@@ -162,6 +162,7 @@ export function Timeline() {
           c.start = ns;
           c.duration = orig.duration - d;
           if (isMediaClip(c)) c.in = Math.max(0, (orig as MediaClip).in + d);
+          if (c.type !== 'audio' && orig.type !== 'audio' && orig.keyframes) c.keyframes = orig.keyframes.map((k) => ({ ...k, t: Math.round((k.t - d) * 1000) / 1000 }));
         } else {
           const { nextStart } = neighbours(f.track, orig);
           const max = Math.min(nextStart, sourceLimited ? orig.start + asset!.duration - (orig as MediaClip).in : Infinity);
@@ -578,6 +579,8 @@ function TrackRow(props: TrackRowProps) {
   );
 }
 
+export const SHAPE_LABEL = { rect: 'Rectángulo', ellipse: 'Elipse', path: 'Trazado' } as const;
+
 const ClipView = memo(function ClipView({ clip, zoom, asset, selected, flash, height, locked, onPointerDown }: {
   clip: Clip;
   zoom: number;
@@ -589,7 +592,8 @@ const ClipView = memo(function ClipView({ clip, zoom, asset, selected, flash, he
   onPointerDown: (e: React.PointerEvent, mode: DragMode) => void;
 }) {
   const w = clip.duration * zoom;
-  const label = isTextClip(clip) ? clip.text.replace(/\n/g, ' ') : asset?.name ?? '(medio no encontrado)';
+  const label = isTextClip(clip) ? clip.text.replace(/\n/g, ' ') : isShapeClip(clip) ? (clip.name ?? SHAPE_LABEL[clip.shape]) : asset?.name ?? '(medio no encontrado)';
+  const keys = keyframesOf(clip);
   const inPoint = isMediaClip(clip) ? clip.in : 0;
   const hasSound = !!asset?.hasAudio && (clip.type === 'audio' || (clip.type === 'video' && !clip.audioDetached));
   return (
@@ -619,6 +623,7 @@ const ClipView = memo(function ClipView({ clip, zoom, asset, selected, flash, he
           {w > 120 && <span className="dur">{clip.duration.toFixed(1)}s</span>}
         </div>
       )}
+      {keys?.map((k, i) => k.t >= 0 && k.t <= clip.duration && <div key={i} className="clip-key" style={{ left: k.t * zoom }} />)}
       <div className="clip-handle l" onPointerDown={(e) => onPointerDown(e, 'trim-l')} />
       {hasSound && <VolumeEnvelope clip={clip as MediaClip} zoom={zoom} height={height} locked={locked} />}
       <div className="clip-handle r" onPointerDown={(e) => onPointerDown(e, 'trim-r')} />

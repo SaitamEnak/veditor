@@ -1,8 +1,8 @@
 import { create } from 'zustand';
-import type { Asset, Clip, MediaClip, Project, TextClip, Track, TrackKind } from '../shared/types';
-import { clipEnd, createEmptyProject, isMediaClip, projectDuration } from '../shared/types';
+import type { Asset, Clip, MediaClip, Project, ShapeClip, TextClip, Track, TrackKind } from '../shared/types';
+import { clipEnd, createEmptyProject, isMediaClip, projectDuration, shiftKeyframes } from '../shared/types';
 import { MIN_CLIP, findClip, isFree, nearestFreeStart, trackAccepts } from './lib/ops';
-import { defaultTextStyle } from './lib/render';
+import { defaultShape, defaultTextStyle } from './lib/render';
 import type { Cue } from './lib/srt';
 import { uid } from './lib/util';
 
@@ -65,6 +65,7 @@ interface EditorState {
   removeAsset: (id: string) => void;
   addAssetClip: (asset: Asset, opts?: { trackId?: string; start?: number }) => void;
   addTextClip: (kind: 'text' | 'subtitle', opts?: { trackId?: string; start?: number }) => void;
+  addShapeClip: (shape: ShapeClip['shape'], opts?: { trackId?: string; start?: number; patch?: Partial<ShapeClip> }) => void;
   importCues: (cues: Cue[]) => void;
   updateClip: (id: string, fn: (c: Clip) => void, history?: boolean) => void;
   splitAt: (t: number, clipId?: string) => void;
@@ -291,6 +292,21 @@ export const useEditor = create<EditorState>((set, get) => ({
     set(sel(id));
   },
 
+  addShapeClip: (shape, opts) => {
+    const id = uid('c');
+    get().update((p) => {
+      const start = Math.max(0, opts?.start ?? get().playhead);
+      const dur = 4;
+      const track = pickTrack(p, 'shape', start, dur, opts?.trackId);
+      const clip: ShapeClip = {
+        ...defaultShape(p), shape, id, start: nearestFreeStart(track, start, dur), duration: dur, transform: centerTransform(p), ...opts?.patch,
+      };
+      if (shape === 'ellipse') clip.h = clip.w;
+      track.clips.push(clip);
+    });
+    set(sel(id));
+  },
+
   importCues: (cues) =>
     get().update((p) => {
       const track = newTrack(p, 'visual');
@@ -338,6 +354,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         b.duration = a.duration - cut;
         b.fadeIn = 0;
         if (isMediaClip(b)) b.in = (a as MediaClip).in + cut;
+        shiftKeyframes(b, -cut);
         a.duration = cut;
         a.fadeOut = 0;
         f.track.clips.splice(f.index + 1, 0, b);

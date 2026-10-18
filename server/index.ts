@@ -86,8 +86,10 @@ const CLAUDE_DIR = path.join(DATA, 'claude');
 fs.mkdirSync(CLAUDE_DIR, { recursive: true });
 const pendingSnapshots = new Map<string, (r: { file: string; playhead: number }) => void>();
 
-app.post('/api/snapshot', async (_req, res) => {
+// Sin t: captura de la vista previa tal cual. Con t: las capas gráficas en ese instante (sin mover el cabezal del usuario).
+app.post('/api/snapshot', async (req, res) => {
   const id = uid();
+  const t = typeof req.body?.t === 'number' ? req.body.t : undefined;
   const result = await new Promise<{ file: string; playhead: number } | null>((resolve) => {
     const timeout = setTimeout(() => {
       pendingSnapshots.delete(id);
@@ -97,7 +99,7 @@ app.post('/api/snapshot', async (_req, res) => {
       clearTimeout(timeout);
       resolve(r);
     });
-    store.broadcast('snapshot', { id });
+    store.broadcast('snapshot', { id, t });
   });
   if (!result) res.status(504).json({ error: 'No hay ningún editor abierto que responda' });
   else res.json(result);
@@ -110,7 +112,8 @@ app.post('/api/snapshot/:id', (req, res) => {
     return;
   }
   pendingSnapshots.delete(req.params.id);
-  const file = path.join(CLAUDE_DIR, 'view.png');
+  const t = req.body.t;
+  const file = path.join(CLAUDE_DIR, typeof t === 'number' ? `view-${t.toFixed(2)}.png` : 'view.png');
   fs.writeFileSync(file, Buffer.from(String(req.body.image).split(',')[1], 'base64'));
   done({ file, playhead: req.body.playhead });
   res.json({ ok: true });
@@ -175,26 +178,57 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
 // ---- Exportación (a <proyecto>/exports) ----
 const jobDirs = new Map<string, string>();
 
-app.post('/api/export', (req, res) => {
-  const { project, renders, options } = req.body as {
-    project: Project;
-    renders: Record<string, string>;
-    options: ExportOptions;
-  };
+// 1) Se crea el trabajo. 2) El navegador sube los cuadros de cada tramo gráfico. 3) Arranca FFmpeg.
+app.post('/api/export/prepare', (_req, res) => {
   const id = uid();
   const jobDir = path.join(store.exportsDir, id);
   fs.mkdirSync(jobDir, { recursive: true });
   jobDirs.set(id, jobDir);
-  const textRenders: Record<string, string> = {};
-  for (const [clipId, dataUrl] of Object.entries(renders ?? {})) {
-    const f = path.join(jobDir, `text_${clipId.replace(/[^\w-]/g, '')}.png`);
-    fs.writeFileSync(f, Buffer.from(dataUrl.split(',')[1], 'base64'));
-    textRenders[clipId] = f;
+  res.json({ id });
+});
+
+const gfxDir = (jobDir: string, run: number) => path.join(jobDir, `gfx${run}`);
+
+app.put('/api/export/:id/frame', express.raw({ type: 'image/png', limit: '64mb' }), (req, res) => {
+  const jobDir = jobDirs.get(req.params.id);
+  const run = Number(req.query.run);
+  const frame = Number(req.query.frame);
+  if (!jobDir || !Number.isInteger(run) || !Number.isInteger(frame) || !Buffer.isBuffer(req.body)) {
+    res.status(400).json({ error: 'cuadro inválido' });
+    return;
   }
-  fs.writeFileSync(path.join(jobDir, 'project.json'), JSON.stringify(project, null, 2));
+  const dir = gfxDir(jobDir, run);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${String(frame).padStart(5, '0')}.png`), req.body);
+  res.json({ ok: true });
+});
+
+app.post('/api/export/:id/start', (req, res) => {
+  const id = req.params.id;
+  const jobDir = jobDirs.get(id);
+  const { project, options, gfx } = req.body as {
+    project: Project;
+    options: ExportOptions;
+    /** Por tramo gráfico: para cada cuadro, el índice del cuadro subido que se repite (los idénticos no se suben) */
+    gfx: number[][];
+  };
+  if (!jobDir) {
+    res.status(404).json({ error: 'no existe' });
+    return;
+  }
   try {
+    const dirs: Record<number, string> = {};
+    (gfx ?? []).forEach((map, run) => {
+      const dir = gfxDir(jobDir, run);
+      const file = (i: number) => path.join(dir, `${String(i).padStart(5, '0')}.png`);
+      map.forEach((src, i) => {
+        if (src !== i && !fs.existsSync(file(i))) fs.linkSync(file(src), file(i));
+      });
+      dirs[run] = dir;
+    });
+    fs.writeFileSync(path.join(jobDir, 'project.json'), JSON.stringify(project, null, 2));
     const job = startExport({
-      id, project, mediaDir: store.mediaDir, jobDir, textRenders,
+      id, project, mediaDir: store.mediaDir, jobDir, gfx: dirs,
       options: { crf: options?.crf ?? 20, preset: options?.preset ?? 'veryfast' },
     });
     res.json(job);

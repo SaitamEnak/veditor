@@ -22,6 +22,7 @@
   --clip-audio: #1f9e7a;
   --clip-text: #9b4fd6;
   --clip-subtitle: #c98a1e;
+  --clip-shape: #d6517d;
 
   --radius: 8px;
   --mono: 'JetBrains Mono', ui-monospace, monospace;
@@ -1012,6 +1013,20 @@ input[type='number']::-webkit-inner-spin-button {
 .clip.subtitle {
   --clip-color: var(--clip-subtitle);
 }
+.clip.shape {
+  --clip-color: var(--clip-shape);
+}
+.clip-key {
+  position: absolute;
+  bottom: 5px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
 .clip.selected {
   box-shadow: inset 0 0 0 2px #fff, 0 0 0 1px rgba(0, 0, 0, 0.6);
   z-index: 2;
@@ -1427,4 +1442,47 @@ input[type='number']::-webkit-inner-spin-button {
   border-radius: 10px;
   background: var(--accent-bg);
   color: var(--accent-2);
+}
+
+.kf-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+}
+.kf-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+  padding: 3px 4px 3px 6px;
+  border-radius: 6px;
+  background: var(--bg-2);
+  font-size: 11px;
+}
+.kf-item.here {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.kf-time {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  background: none;
+  border: 0;
+  color: var(--text-0);
+  font: 11px var(--mono);
+  cursor: pointer;
+  padding: 0;
+}
+.kf-props {
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kf-ease {
+  height: 24px;
+  font-size: 11px;
+  padding: 0 4px;
+  width: 78px;
 }

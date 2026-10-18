@@ -1,9 +1,9 @@
 import {
-  AlignCenter, AlignLeft, AlignRight, Bold, CaseUpper, Copy, Crosshair, Film, Image as ImageIcon, Italic, Maximize,
-  Music, Scissors, Spline, Subtitles, Trash2, Type, Unlink, X,
+  AlignCenter, AlignLeft, AlignRight, Bold, CaseUpper, Circle, Copy, Crosshair, Diamond, Film, Image as ImageIcon, Italic, Maximize,
+  Music, PenTool, Scissors, Shapes, Spline, Square, Subtitles, Trash2, Type, Unlink, X,
 } from 'lucide-react';
-import type { Clip, MediaClip, Project, TextClip, TextStyle, Transform } from '../../shared/types';
-import { clipEnd, envelopeAt, isMediaClip, isTextClip, projectDuration } from '../../shared/types';
+import type { AnimProp, Clip, Easing, MediaClip, Project, ShapeClip, TextClip, TextStyle } from '../../shared/types';
+import { EASINGS, animState, clipEnd, envelopeAt, isMediaClip, isShapeClip, isTextClip, projectDuration, setAnimated } from '../../shared/types';
 import { findClip } from '../lib/ops';
 import { FONTS } from '../lib/render';
 import { formatTime } from '../lib/util';
@@ -16,7 +16,11 @@ export const CLIP_META: Record<Clip['type'], { label: string; color: string; Ico
   audio: { label: 'Audio', color: 'var(--clip-audio)', Icon: Music },
   text: { label: 'Texto', color: 'var(--clip-text)', Icon: Type },
   subtitle: { label: 'Subtítulo', color: 'var(--clip-subtitle)', Icon: Subtitles },
+  shape: { label: 'Forma', color: 'var(--clip-shape)', Icon: Shapes },
 };
+
+const SHAPE_NAMES = { rect: 'Rectángulo', ellipse: 'Elipse', path: 'Trazado' } as const;
+const PROP_LABEL: Record<AnimProp, string> = { x: 'X', y: 'Y', scale: 'Esc', rotation: 'Rot', opacity: 'Opac', w: 'An', h: 'Al', reveal: 'Rev' };
 
 export function Inspector() {
   const project = useEditor((s) => s.project);
@@ -44,7 +48,7 @@ function ClipInspector({ clip, project, locked }: { clip: Clip; project: Project
   const edit = (fn: (c: any) => void) => !locked && updateClip(clip.id, fn, false);
   const meta = CLIP_META[clip.type];
   const asset = isMediaClip(clip) ? project.assets.find((a) => a.id === clip.assetId) : undefined;
-  const title = isTextClip(clip) ? clip.text.split('\n')[0] || meta.label : asset?.name ?? 'Medio no encontrado';
+  const title = isTextClip(clip) ? clip.text.split('\n')[0] || meta.label : isShapeClip(clip) ? (clip.name ?? SHAPE_NAMES[clip.shape]) : asset?.name ?? 'Medio no encontrado';
   const detached = clip.type === 'video' && !!clip.audioDetached;
   const hasAudio = clip.type === 'audio' || (clip.type === 'video' && asset?.hasAudio && !detached);
   const visual = clip.type !== 'audio';
@@ -111,7 +115,11 @@ function ClipInspector({ clip, project, locked }: { clip: Clip; project: Project
 
         {isTextClip(clip) && <TextSections clip={clip} edit={edit} />}
 
-        {visual && <TransformSection clip={clip as MediaClip | TextClip} project={project} edit={edit} aspect={asset && { w: asset.width, h: asset.height }} />}
+        {isShapeClip(clip) && <ShapeSection clip={clip} project={project} edit={edit} />}
+
+        {visual && <TransformSection clip={clip} project={project} edit={edit} aspect={asset && { w: asset.width, h: asset.height }} />}
+
+        {visual && <KeyframesSection clip={clip} project={project} locked={locked} />}
 
         {hasAudio && (
           <Section title="Audio">
@@ -250,7 +258,11 @@ function MultiInspector({ ids, project }: { ids: string[]; project: Project }) {
           <div className="sub-list">
             {clips.map((f) => {
               const meta = CLIP_META[f.clip.type];
-              const name = isTextClip(f.clip) ? f.clip.text : project.assets.find((a) => a.id === (f.clip as MediaClip).assetId)?.name;
+              const name = isTextClip(f.clip)
+                ? f.clip.text
+                : isShapeClip(f.clip)
+                  ? (f.clip.name ?? SHAPE_NAMES[f.clip.shape])
+                  : project.assets.find((a) => a.id === (f.clip as MediaClip).assetId)?.name;
               return (
                 <button key={f.clip.id} className="multi-item" onClick={() => select(f.clip.id)} title="Seleccionar sólo este clip">
                   <meta.Icon size={12} color={meta.color} />
@@ -266,14 +278,20 @@ function MultiInspector({ ids, project }: { ids: string[]; project: Project }) {
   );
 }
 
+/** Tiempo local del cabezal dentro del clip (acotado al clip). */
+const useLocal = (clip: Clip) => useEditor((s) => Math.min(clip.duration, Math.max(0, s.playhead - clip.start)));
+
 function TransformSection({ clip, project, edit, aspect }: {
-  clip: MediaClip | TextClip;
+  clip: Clip;
   project: Project;
   edit: (fn: (c: any) => void) => void;
   aspect?: { w: number; h: number };
 }) {
-  const t = clip.transform;
-  const set = (k: keyof Transform, v: number) => edit((c) => (c.transform[k] = v));
+  const local = useLocal(clip);
+  const st = animState(clip, local);
+  const t = st.transform;
+  // Con keyframes, cada cambio crea o edita el keyframe del cabezal
+  const set = (k: AnimProp, v: number) => edit((c) => setAnimated(c, local, { [k]: v }, project.fps));
   const fill = () => {
     if (!aspect) return;
     const rx = project.width / aspect.w;
@@ -305,6 +323,153 @@ function TransformSection({ clip, project, edit, aspect }: {
         <NumberField label="Rotación" value={t.rotation} step={1} suffix="°" precision={1} onChange={(v) => set('rotation', v)} />
       </div>
       <SliderField label="Opacidad" value={t.opacity} min={0} max={1} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => set('opacity', v)} />
+      {isTextClip(clip) && (
+        <SliderField label="Revelado" value={st.reveal} min={0} max={1} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => edit((c) => setAnimated(c, local, { reveal: v }, project.fps, true))} />
+      )}
+    </Section>
+  );
+}
+
+function ShapeSection({ clip, project, edit }: { clip: ShapeClip; project: Project; edit: (fn: (c: any) => void) => void }) {
+  const local = useLocal(clip);
+  const st = animState(clip, local);
+  const set = <K extends keyof ShapeClip>(k: K, v: ShapeClip[K]) => edit((c) => (c[k] = v));
+  return (
+    <Section title="Forma">
+      <div className="row">
+        <label className="field">
+          <span className="field-label">Tipo</span>
+          <Segmented
+            value={clip.shape}
+            onChange={(v) => set('shape', v)}
+            options={[
+              { value: 'rect', icon: <Square size={13} />, title: 'Rectángulo' },
+              { value: 'ellipse', icon: <Circle size={13} />, title: 'Elipse' },
+              { value: 'path', icon: <PenTool size={13} />, title: 'Trazado SVG' },
+            ]}
+          />
+        </label>
+        <label className="field">
+          <span className="field-label">Nombre</span>
+          <input className="input" value={clip.name ?? ''} placeholder={SHAPE_NAMES[clip.shape]} onChange={(e) => set('name', e.target.value || undefined)} />
+        </label>
+      </div>
+      <div className="row">
+        <NumberField label="Ancho" value={st.w} min={0} precision={0} suffix="px" onChange={(v) => edit((c) => setAnimated(c, local, { w: v }, project.fps))} />
+        <NumberField label="Alto" value={st.h} min={0} precision={0} suffix="px" onChange={(v) => edit((c) => setAnimated(c, local, { h: v }, project.fps))} />
+      </div>
+      <div className="row">
+        <ColorField label="Relleno" value={clip.fill} onChange={(v) => set('fill', v)} />
+        {clip.shape === 'rect' ? <NumberField label="Radio" value={clip.radius} min={0} precision={0} suffix="px" onChange={(v) => set('radius', v)} /> : <span />}
+      </div>
+      <SliderField label="Opacidad" value={clip.fillOpacity} min={0} max={1} format={(v) => `${Math.round(v * 100)}%`} onChange={(v) => set('fillOpacity', v)} />
+      <div className="row">
+        <ColorField label="Borde" value={clip.stroke} onChange={(v) => set('stroke', v)} />
+        <NumberField label="Grosor" value={clip.strokeWidth} min={0} max={100} precision={1} suffix="px" onChange={(v) => set('strokeWidth', v)} />
+      </div>
+      <div className="row">
+        <ColorField label="Sombra" value={clip.shadowColor} onChange={(v) => set('shadowColor', v)} />
+        <NumberField label="Desenfoque" value={clip.shadowBlur} min={0} max={300} precision={0} suffix="px" onChange={(v) => set('shadowBlur', v)} />
+      </div>
+      <div className="row">
+        <NumberField label="Desplaz. Y" value={clip.shadowY} precision={0} suffix="px" onChange={(v) => set('shadowY', v)} />
+        <NumberField label="Opac. sombra" value={clip.shadowOpacity * 100} min={0} max={100} precision={0} suffix="%" onChange={(v) => set('shadowOpacity', v / 100)} />
+      </div>
+      {clip.shape === 'path' && (
+        <>
+          <label className="field">
+            <span className="field-label">Trazado SVG (d)</span>
+            <textarea className="textarea" value={clip.path ?? ''} onChange={(e) => set('path', e.target.value)} />
+          </label>
+          <div className="row">
+            <NumberField label="viewBox ancho" value={clip.pathW ?? 100} min={1} precision={0} onChange={(v) => set('pathW', v)} />
+            <NumberField label="viewBox alto" value={clip.pathH ?? 100} min={1} precision={0} onChange={(v) => set('pathH', v)} />
+          </div>
+        </>
+      )}
+    </Section>
+  );
+}
+
+function KeyframesSection({ clip, project, locked }: { clip: Clip; project: Project; locked: boolean }) {
+  const { updateClip, setPlayhead } = useEditor.getState();
+  const playhead = useEditor((s) => s.playhead);
+  const local = playhead - clip.start;
+  const inside = local >= 0 && local <= clip.duration;
+  const keys = clip.type === 'audio' ? [] : (clip.keyframes ?? []);
+  const fps = project.fps;
+  const editKeys = (fn: (c: Clip) => void) => !locked && updateClip(clip.id, fn);
+
+  const addHere = () =>
+    editKeys((c) => {
+      if (c.type === 'audio') return;
+      const st = animState(c, local);
+      const patch: Partial<Record<AnimProp, number>> = { ...st.transform };
+      if (c.type === 'shape') Object.assign(patch, { w: st.w, h: st.h });
+      if (isTextClip(c) && c.keyframes?.some((k) => k.reveal !== undefined)) patch.reveal = st.reveal;
+      setAnimated(c, local, patch, fps, true);
+    });
+
+  return (
+    <Section
+      title={`Keyframes${keys.length ? ` · ${keys.length}` : ''}`}
+      extra={
+        keys.length > 0 && (
+          <button className="btn sm icon ghost" title="Quitar todos los keyframes" disabled={locked} onClick={() => editKeys((c) => void (c.type !== 'audio' && delete c.keyframes))}>
+            <X size={13} />
+          </button>
+        )
+      }
+    >
+      <button className="btn sm block" disabled={locked || !inside} onClick={addHere} title="Guarda la posición, escala, rotación y opacidad actuales en el cabezal">
+        <Diamond size={13} /> Keyframe en el cabezal
+      </button>
+      {keys.length > 0 && (
+        <div className="kf-list">
+          {keys.map((k, i) => {
+            const here = Math.abs(k.t - local) < 0.5 / fps;
+            const props = (Object.keys(PROP_LABEL) as AnimProp[]).filter((p) => k[p] !== undefined);
+            return (
+              <div key={i} className={`kf-item ${here ? 'here' : ''}`}>
+                <button className="kf-time" title="Ir a este keyframe" onClick={() => setPlayhead(clip.start + k.t + 1e-4)}>
+                  <Diamond size={10} /> {k.t.toFixed(2)}s
+                </button>
+                <span className="kf-props" title={props.map((p) => `${PROP_LABEL[p]} ${Math.round(k[p]! * 100) / 100}`).join(' · ')}>
+                  {props.map((p) => PROP_LABEL[p]).join(' ')}
+                </span>
+                {i > 0 ? (
+                  <select
+                    className="select kf-ease"
+                    title="Curva del tramo que llega a este keyframe"
+                    value={k.ease ?? 'inOut'}
+                    disabled={locked}
+                    onChange={(e) => editKeys((c) => void (c.type !== 'audio' && c.keyframes && (c.keyframes[i].ease = e.target.value as Easing)))}
+                  >
+                    {EASINGS.map((e) => (
+                      <option key={e.value} value={e.value}>
+                        {e.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span />
+                )}
+                <button
+                  className="btn sm icon ghost"
+                  title="Borrar keyframe"
+                  disabled={locked}
+                  onClick={() => editKeys((c) => void (c.type !== 'audio' && c.keyframes?.splice(i, 1)))}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="insp-sub" style={{ marginTop: 8 }}>
+        Con keyframes, mover, escalar o rotar en la vista previa edita el keyframe del cabezal (o crea uno nuevo).
+      </div>
     </Section>
   );
 }
@@ -363,6 +528,10 @@ function TextSections({ clip, edit }: { clip: TextClip; edit: (fn: (c: any) => v
           <NumberField label="Ancho máx." value={s.maxWidth} min={0} precision={0} suffix="px" step={5} onChange={(v) => set('maxWidth', v)} />
         </div>
         <div className="row">
+          <NumberField label="Ancho caja" value={s.boxWidth ?? 0} min={0} precision={0} suffix="px" step={5} onChange={(v) => set('boxWidth', v || undefined)} />
+          <span />
+        </div>
+        <div className="row">
           <NumberField label="Interlineado" value={s.lineHeight} min={0.5} max={4} step={0.05} onChange={(v) => set('lineHeight', v)} />
           <NumberField label="Espaciado" value={s.letterSpacing} step={0.5} precision={1} suffix="px" onChange={(v) => set('letterSpacing', v)} />
         </div>
@@ -414,6 +583,10 @@ function ProjectInspector({ project }: { project: Project }) {
           if (c.type === 'audio') continue;
           c.transform.x *= sx;
           c.transform.y *= sy;
+          for (const k of c.keyframes ?? []) {
+            if (k.x !== undefined) k.x *= sx;
+            if (k.y !== undefined) k.y *= sy;
+          }
           if (isTextClip(c)) {
             c.style.fontSize = Math.round(c.style.fontSize * sf);
             c.style.padding = Math.round(c.style.padding * sf);

@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ChevronFirst, ChevronLast, Pause, Play, StepBack, StepForward } from 'lucide-react';
-import type { Asset, Clip, MediaClip, Project, TextClip } from '../../shared/types';
-import { MAX_GAIN, clipEnd, envelopeAt, fadeFactor, fittedSize, isMediaClip, isTextClip, projectDuration } from '../../shared/types';
+import type { Asset, Clip, MediaClip } from '../../shared/types';
+import { MAX_GAIN, animState, clipEnd, envelopeAt, fadeFactor, isMediaClip, projectDuration, setAnimated } from '../../shared/types';
 import { findClip } from '../lib/ops';
 import { previewCanvas, previewMedia } from '../lib/previewCanvas';
-import { drawText, visualBox } from '../lib/render';
+import { drawClipAt, visualBox } from '../lib/render';
 import { formatTime } from '../lib/util';
 import { useEditor } from '../store';
 
@@ -109,17 +109,6 @@ function syncMedia(el: HTMLMediaElement, target: number, playing: boolean, fps: 
   }
 }
 
-function drawMedia(ctx: CanvasRenderingContext2D, src: CanvasImageSource, clip: MediaClip, asset: Asset, p: Project, alpha: number) {
-  const t = clip.transform;
-  const { w, h } = fittedSize(asset.width, asset.height, p.width, p.height, t.scale);
-  ctx.save();
-  ctx.globalAlpha = t.opacity * alpha;
-  ctx.translate(t.x, t.y);
-  ctx.rotate((t.rotation * Math.PI) / 180);
-  ctx.drawImage(src, -w / 2, -h / 2, w, h);
-  ctx.restore();
-}
-
 export function Preview() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -163,7 +152,7 @@ export function Preview() {
       const assets = new Map(p.assets.map((a) => [a.id, a]));
       const active = new Set<string>();
       const existing = new Set<string>();
-      const layers: { clip: Clip; local: number; asset?: Asset }[] = [];
+      const layers: Clip[] = [];
       let waiting = false;
 
       for (let ti = p.tracks.length - 1; ti >= 0; ti--) {
@@ -190,7 +179,7 @@ export function Preview() {
               el.currentTime = clip.in; // precarga del punto de entrada
             }
           }
-          if (isActive && track.kind === 'visual' && !track.hidden) layers.push({ clip, local, asset });
+          if (isActive && track.kind === 'visual' && !track.hidden) layers.push(clip);
         }
       }
       pool.sweep(active, existing);
@@ -202,17 +191,17 @@ export function Preview() {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.fillStyle = p.background;
       ctx.fillRect(0, 0, p.width, p.height);
-      for (const { clip, local, asset } of layers) {
-        const alpha = fadeFactor(clip, local);
-        if (isTextClip(clip)) drawText(ctx, clip, alpha);
-        else if (asset?.kind === 'image') {
+      const sources = {
+        image: (asset: Asset) => {
           const img = pool.image(asset);
-          if (img.complete && img.naturalWidth) drawMedia(ctx, img, clip as MediaClip, asset, p, alpha);
-        } else if (asset?.kind === 'video') {
-          const el = pool.media(clip as MediaClip, asset).el as HTMLVideoElement;
-          if (el.readyState >= 2) drawMedia(ctx, el, clip as MediaClip, asset, p, alpha);
-        }
-      }
+          return img.complete && img.naturalWidth ? img : null;
+        },
+        video: (clip: MediaClip, asset: Asset) => {
+          const el = pool.media(clip, asset).el as HTMLVideoElement;
+          return el.readyState >= 2 ? el : null;
+        },
+      };
+      for (const clip of layers) drawClipAt(ctx, clip, t, p, sources);
     };
     raf = requestAnimationFrame(frame);
     const unsub = useEditor.subscribe((s, prev) => {
@@ -243,6 +232,7 @@ export function Preview() {
 function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: React.RefObject<HTMLCanvasElement | null> }) {
   const project = useEditor((s) => s.project);
   const selectedId = useEditor((s) => s.selectedId);
+  const playhead = useEditor((s) => s.playhead);
   const isActive = useEditor((s) => {
     const f = findClip(s.project, s.selectedId);
     return !!f && s.playhead >= f.clip.start && s.playhead < clipEnd(f.clip);
@@ -262,7 +252,7 @@ function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: Reac
       for (const c of track.clips) {
         if (c.type === 'audio' || st.playhead < c.start || st.playhead >= clipEnd(c)) continue;
         const asset = isMediaClip(c) ? st.project.assets.find((a) => a.id === c.assetId) : undefined;
-        const b = visualBox(ctx, c as TextClip, st.project, asset);
+        const b = visualBox(ctx, c, st.project, asset, st.playhead - c.start);
         const a = (-b.rotation * Math.PI) / 180;
         const dx = px - b.cx;
         const dy = py - b.cy;
@@ -288,7 +278,9 @@ function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: Reac
     const st = useEditor.getState();
     const f = findClip(st.project, id);
     if (!f || f.clip.type === 'audio' || f.track.locked) return;
-    const t0 = { ...f.clip.transform };
+    // Con keyframes se edita (o crea) el keyframe del cabezal
+    const local = st.playhead - f.clip.start;
+    const t0 = animState(f.clip, local).transform;
     const stage = (e.currentTarget as HTMLElement).closest('.stage-inner')!.getBoundingClientRect();
     const toCanvas = (ev: PointerEvent) => ({ x: (ev.clientX - stage.left) / scale, y: (ev.clientY - stage.top) / scale });
     const start = toCanvas(e.nativeEvent);
@@ -302,7 +294,7 @@ function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: Reac
       const pt = toCanvas(ev);
       st.updateClip(id, (c) => {
         if (c.type === 'audio') return;
-        const tr = c.transform;
+        const tr = { ...t0 };
         if (mode === 'move') {
           let x = t0.x + pt.x - start.x;
           let y = t0.y + pt.y - start.y;
@@ -321,6 +313,8 @@ function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: Reac
           if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
           tr.rotation = Math.round(deg * 10) / 10;
         }
+        const patch = mode === 'move' ? { x: tr.x, y: tr.y } : mode === 'scale' ? { scale: tr.scale } : { rotation: tr.rotation };
+        setAnimated(c, local, patch, st.project.fps);
       }, false);
     };
     const up = () => {
@@ -335,7 +329,7 @@ function SelectionOverlay({ scale, canvasRef }: { scale: number; canvasRef: Reac
   if (found && isActive && found.clip.type !== 'audio' && ctx) {
     const c = found.clip;
     const asset = isMediaClip(c) ? project.assets.find((a) => a.id === c.assetId) : undefined;
-    const b = visualBox(ctx, c as TextClip, project, asset);
+    const b = visualBox(ctx, c, project, asset, playhead - c.start);
     box = (
       <div
         className="sel-box"

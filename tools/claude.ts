@@ -5,6 +5,9 @@
  *   pnpm claude frame [t]        Renderiza con FFmpeg el fotograma en t (por defecto, el cabezal) -> data/claude/frame.png
  *                                (sin textos: esos los dibuja el navegador; para verlos usa "snapshot")
  *   pnpm claude snapshot         Captura exacta de la vista previa del navegador -> data/claude/view.png
+ *   pnpm claude snapshot t…      Capas gráficas (textos, formas, imágenes; sin videos) en esos instantes, sin mover
+ *                                el cabezal del usuario -> data/claude/view-<t>.png
+ *   pnpm claude sheet t…         Igual, pero juntas en una hoja de contactos -> data/claude/sheet.png (para revisar animaciones)
  *
  *   pnpm claude projects         Lista los proyectos (data/projects/<carpeta>) e indica el abierto
  *
@@ -14,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Clip, Project } from '../shared/types.ts';
-import { clipEnd, isMediaClip, projectDuration } from '../shared/types.ts';
+import { clipEnd, isMediaClip, isShapeClip, keyframesOf, projectDuration, shiftKeyframes } from '../shared/types.ts';
 import { buildFfmpegGraph } from '../server/export.ts';
 import { FFMPEG, run } from '../server/ffmpeg.ts';
 
@@ -49,7 +52,9 @@ function describe(c: Clip, p: Project) {
     ].filter(Boolean);
     return `${base}  "${a?.name ?? '?'}"  ${extra.join(' ')}`;
   }
-  return `${base}  "${c.text.replace(/\n/g, ' / ').slice(0, 60)}"`;
+  const keys = keyframesOf(c)?.length ? `  keyframes=${keyframesOf(c)!.length}` : '';
+  if (isShapeClip(c)) return `${base}  [${c.name ?? c.shape}] ${Math.round(c.w)}x${Math.round(c.h)} ${c.fill}  pos=${Math.round(c.transform.x)},${Math.round(c.transform.y)}${keys}`;
+  return `${base}  "${c.text.replace(/\n/g, ' / ').slice(0, 60)}"${keys}`;
 }
 
 function state() {
@@ -85,10 +90,11 @@ async function frame(tArg?: string) {
       .map((c) => {
         const d = t - c.start;
         const fade = { fadeIn: c.fadeIn > d ? c.fadeIn : 0, fadeOut: 0 };
+        shiftKeyframes(c, -d);
         return isMediaClip(c) ? { ...c, ...fade, start: 0, in: c.in + d, duration: 0.5 } : { ...c, ...fade, start: 0, duration: 0.5 };
       });
   }
-  const { inputs, graph } = buildFfmpegGraph({ project: sub, mediaDir: path.join(projectDir(), 'media'), textRenders: {}, audio: false });
+  const { inputs, graph } = buildFfmpegGraph({ project: sub, mediaDir: path.join(projectDir(), 'media'), gfx: {}, audio: false });
   const graphFile = path.join(OUT, 'frame-graph.txt');
   fs.writeFileSync(graphFile, graph);
   const out = path.join(OUT, 'frame.png');
@@ -96,11 +102,35 @@ async function frame(tArg?: string) {
   console.log(`Fotograma t=${f(t)}s -> ${out}`);
 }
 
-async function snapshot() {
-  const r = await fetch(`${API}/api/snapshot`, { method: 'POST' });
+async function snapAt(t?: number): Promise<string> {
+  const r = await fetch(`${API}/api/snapshot`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(t === undefined ? {} : { t }),
+  });
   const j = await r.json();
   if (!r.ok) throw new Error(j.error);
-  console.log(`Vista previa (cabezal ${f(j.playhead)}s) -> ${j.file}`);
+  console.log(t === undefined ? `Vista previa (cabezal ${f(j.playhead)}s) -> ${j.file}` : `Capas gráficas t=${f(t)}s -> ${j.file}`);
+  return j.file;
+}
+
+async function snapshot(...times: string[]) {
+  if (!times.length) await snapAt();
+  for (const t of times) await snapAt(parseFloat(t));
+}
+
+async function sheet(...times: string[]) {
+  if (!times.length) throw new Error('Uso: pnpm claude sheet t1 t2 …');
+  const tmp = path.join(OUT, 'sheet');
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.mkdirSync(tmp);
+  for (const [i, t] of times.entries()) fs.copyFileSync(await snapAt(parseFloat(t)), path.join(tmp, `${String(i).padStart(3, '0')}.png`));
+  const cols = Math.min(4, times.length);
+  const rows = Math.ceil(times.length / cols);
+  const out = path.join(OUT, 'sheet.png');
+  const labels = times.map((t, i) => `drawtext=text='${parseFloat(t).toFixed(2)}s':x=12:y=10:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=6:enable='eq(n,${i})'`).join(',');
+  await run(FFMPEG, ['-y', '-v', 'error', '-framerate', '1', '-i', path.join(tmp, '%03d.png'), '-vf', `scale=640:-2,${labels},tile=${cols}x${rows}:padding=6:color=0x444444`, '-frames:v', '1', out]);
+  console.log(`Hoja de contactos (${times.length} cuadros) -> ${out}`);
 }
 
 function projects() {
@@ -114,9 +144,9 @@ function projects() {
 }
 
 const [cmd, ...args] = process.argv.slice(2);
-const cmds: Record<string, (...a: string[]) => unknown> = { state, frame, snapshot, projects };
+const cmds: Record<string, (...a: string[]) => unknown> = { state, frame, snapshot, sheet, projects };
 if (!cmd || !cmds[cmd]) {
-  console.log('Uso: pnpm claude <state | frame [t] | snapshot | projects>');
+  console.log('Uso: pnpm claude <state | frame [t] | snapshot [t…] | sheet t… | projects>');
   process.exit(1);
 }
 Promise.resolve(cmds[cmd](...args)).catch((e) => {

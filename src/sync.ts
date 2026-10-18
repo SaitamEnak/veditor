@@ -1,4 +1,5 @@
 import { previewCanvas, previewMedia } from './lib/previewCanvas';
+import { renderGraphicsFrame } from './lib/render';
 import { useEditor } from './store';
 import { uid } from './lib/util';
 
@@ -49,14 +50,14 @@ export function startSync() {
   });
 
   es.addEventListener('snapshot', async (e) => {
-    const { id } = JSON.parse((e as MessageEvent).data);
-    const c = previewCanvas.current;
-    if (!c) return;
+    const { id, t } = JSON.parse((e as MessageEvent).data) as { id: string; t?: number };
     const st = useEditor.getState();
+    const c = typeof t === 'number' ? await renderGraphicsFrame(st.project, t) : previewCanvas.current;
+    if (!c) return;
     await fetch(`/api/snapshot/${id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: c.toDataURL('image/png'), playhead: st.playhead }),
+      body: JSON.stringify({ image: c.toDataURL('image/png'), playhead: st.playhead, t }),
     }).catch(() => {});
   });
 

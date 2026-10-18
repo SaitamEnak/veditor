@@ -27,6 +27,8 @@ The user edits in the browser GUI. Claude edits the project file. This is not mu
 
 - `pnpm claude frame [t]`: frame at timeline time t, without text, saved to `data/claude/frame.png`. Read the image afterwards.
 - `pnpm claude snapshot`: exact capture of the user's preview with text, saved to `data/claude/view.png`. It needs the editor open in a tab.
+- `pnpm claude snapshot t…` / `pnpm claude sheet t…`: graphic layers (text, shapes, images; no video) at those times without moving the user's playhead; `sheet` tiles them into `data/claude/sheet.png` to review animations. Also needs an editor tab.
+- Animation: visual clips accept `keyframes` (local time, see `Keyframe` in `shared/types.ts`); `shape` clips are rectangles, ellipses or SVG paths. Export draws graphic layers in the browser frame by frame (`planLayers`), so preview and MP4 match.
 - Claude cannot hear audio. For audio analysis, run FFmpeg (`silencedetect`, `volumedetect`) using the binary path from `server/ffmpeg.ts`.
 
 ## Code changes

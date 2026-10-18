@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
-  type ExportJob, type ExportOptions, type MediaClip, type Project, type VolumeKey, clipEnd, fittedSize, isMediaClip, isTextClip, projectDuration,
+  type AnimProp, type Easing, type ExportJob, type ExportOptions, type MediaClip, type Project, type VolumeKey,
+  animValue, clipEnd, fittedSize, isMediaClip, planLayers, projectDuration,
 } from '../shared/types.ts';
 import { FFMPEG } from './ffmpeg.ts';
 
@@ -28,11 +29,41 @@ export function envelopeExpr(keys: VolumeKey[], inPoint: number) {
   return parts.join('+');
 }
 
+/** Curva de easing como expresión de FFmpeg en función de P (0..1). Debe coincidir con easeFn de shared/types. */
+function easeExpr(e: Easing | undefined, P: string) {
+  switch (e ?? 'inOut') {
+    case 'linear':
+      return P;
+    case 'in':
+      return `pow(${P},3)`;
+    case 'out':
+      return `(1-pow(1-${P},3))`;
+    case 'back':
+      return `(1+2.70158*pow(${P}-1,3)+1.70158*pow(${P}-1,2))`;
+    default:
+      return `if(lt(${P},0.5),4*pow(${P},3),1-pow(2-2*${P},3)/2)`;
+  }
+}
+
+/** Propiedad animada -> expresión de FFmpeg en tiempo de la línea de tiempo (suma de tramos, sin anidar). */
+function animExpr(clip: MediaClip, prop: AnimProp) {
+  const keys = (clip.keyframes ?? []).filter((k) => k[prop] !== undefined);
+  if (keys.length < 2) return num(animValue(clip, prop, 0));
+  const parts = [num(keys[0][prop]!)];
+  for (let i = 1; i < keys.length; i++) {
+    const a = keys[i - 1];
+    const b = keys[i];
+    const P = `clip((t-${num(clip.start + a.t)})/${num(Math.max(0.001, b.t - a.t))},0,1)`;
+    parts.push(`(${num(b[prop]! - a[prop]!)})*${easeExpr(b.ease, P)}`);
+  }
+  return parts.join('+');
+}
+
 interface BuildInput {
   project: Project;
   mediaDir: string;
-  /** clipId -> PNG a tamaño completo del lienzo con el texto ya dibujado */
-  textRenders: Record<string, string>;
+  /** Índice del tramo gráfico (en planLayers) -> carpeta con su secuencia de PNG (00000.png, 00001.png…) */
+  gfx: Record<number, string>;
   /** false = sólo video (para renderizar fotogramas sueltos) */
   audio?: boolean;
 }
@@ -41,7 +72,7 @@ interface BuildInput {
  * Traduce el proyecto a un comando de FFmpeg con un filter_complex:
  * fondo de color -> overlays apilados (de la pista inferior a la superior) + mezcla de audio.
  */
-export function buildFfmpegGraph({ project, mediaDir, textRenders, audio = true }: BuildInput) {
+export function buildFfmpegGraph({ project, mediaDir, gfx, audio = true }: BuildInput) {
   const W = even(project.width);
   const H = even(project.height);
   const fps = project.fps;
@@ -61,55 +92,52 @@ export function buildFfmpegGraph({ project, mediaDir, textRenders, audio = true 
   let last = 'base';
   let layer = 0;
 
-  // Capas visuales: de abajo hacia arriba
-  const visualTracks = [...project.tracks].reverse().filter((t) => t.kind === 'visual' && !t.hidden);
-  for (const track of visualTracks) {
-    for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
-      const start = clip.start;
-      const end = clipEnd(clip);
+  // Capas visuales, de abajo hacia arriba: videos con FFmpeg, tramos gráficos como secuencias del navegador
+  let gfxIndex = 0;
+  for (const item of planLayers(project)) {
+    const label = `v${layer++}`;
+    let src: string;
+    let start: number;
+    let end: number;
+    let x = '0';
+    let y = '0';
+    if (item.kind === 'gfx') {
+      const dir = gfx[gfxIndex++];
+      if (!dir) continue;
+      start = item.k0 / fps;
+      end = item.k1 / fps;
+      const idx = addInput(['-framerate', String(fps), '-start_number', '0', '-i', path.join(dir, '%05d.png')]);
+      src = `[${idx}:v]format=rgba,setpts=PTS-STARTPTS+${num(start)}/TB`;
+    } else {
+      const { clip, track } = item;
+      const asset = assets.get(clip.assetId);
+      if (!asset) continue;
+      start = clip.start;
+      end = clipEnd(clip);
       const dur = clip.duration;
-      const fades: string[] = [];
-      if (clip.fadeIn > 0) fades.push(`fade=t=in:st=0:d=${num(clip.fadeIn)}:alpha=1`);
-      if (clip.fadeOut > 0) fades.push(`fade=t=out:st=${num(Math.max(0, dur - clip.fadeOut))}:d=${num(clip.fadeOut)}:alpha=1`);
-      const label = `v${layer++}`;
-      let chain: string[];
-      let x = '0';
-      let y = '0';
-      let idx: number;
-
-      if (isTextClip(clip)) {
-        const png = textRenders[clip.id];
-        if (!png) continue;
-        idx = addInput(['-loop', '1', '-framerate', String(fps), '-t', num(dur), '-i', png]);
-        chain = ['format=rgba', ...fades];
-      } else {
-        const asset = assets.get(clip.assetId);
-        if (!asset || asset.kind === 'audio') continue;
-        const file = path.join(mediaDir, asset.file);
-        if (asset.kind === 'image') {
-          idx = addInput(['-loop', '1', '-framerate', String(fps), '-t', num(dur), '-i', file]);
-        } else {
-          idx = addInput(['-ss', num(clip.in), '-t', num(dur), '-i', file]);
-          if (audio && asset.hasAudio && !clip.audioDetached && !track.muted && clip.volume > 0) audioLabels.push(audioChain(graph, idx, clip, start));
-        }
-        const { w, h } = fittedSize(asset.width, asset.height, project.width, project.height, clip.transform.scale);
-        const t = clip.transform;
-        chain = [`scale=${even(w)}:${even(h)}`, 'format=rgba'];
-        if (t.rotation % 360 !== 0) {
-          const rad = num((t.rotation * Math.PI) / 180);
-          chain.push(`rotate=${rad}:ow=rotw(${rad}):oh=roth(${rad}):c=none`);
-        }
-        if (t.opacity < 1) chain.push(`colorchannelmixer=aa=${num(t.opacity)}`);
-        chain.push(...fades);
-        x = `${num(t.x)}-overlay_w/2`;
-        y = `${num(t.y)}-overlay_h/2`;
+      const idx = addInput(['-ss', num(clip.in), '-t', num(dur), '-i', path.join(mediaDir, asset.file)]);
+      if (audio && asset.hasAudio && !clip.audioDetached && !track.muted && clip.volume > 0) audioLabels.push(audioChain(graph, idx, clip, start));
+      // Escala, rotación y opacidad de un video no se animan al exportar (se usa su valor al inicio); la posición sí
+      const scale = animValue(clip, 'scale', 0);
+      const rotation = animValue(clip, 'rotation', 0);
+      const opacity = animValue(clip, 'opacity', 0);
+      const { w, h } = fittedSize(asset.width, asset.height, project.width, project.height, scale);
+      const chain = [`scale=${even(w)}:${even(h)}`, 'format=rgba'];
+      if (rotation % 360 !== 0) {
+        const rad = num((rotation * Math.PI) / 180);
+        chain.push(`rotate=${rad}:ow=rotw(${rad}):oh=roth(${rad}):c=none`);
       }
-
-      graph.push(`[${idx}:v]setpts=PTS-STARTPTS,${chain.join(',')},setpts=PTS+${num(start)}/TB[${label}]`);
-      const out = `o${layer}`;
-      graph.push(`[${last}][${label}]overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${num(start)},${num(end)})'[${out}]`);
-      last = out;
+      if (opacity < 1) chain.push(`colorchannelmixer=aa=${num(opacity)}`);
+      if (clip.fadeIn > 0) chain.push(`fade=t=in:st=0:d=${num(clip.fadeIn)}:alpha=1`);
+      if (clip.fadeOut > 0) chain.push(`fade=t=out:st=${num(Math.max(0, dur - clip.fadeOut))}:d=${num(clip.fadeOut)}:alpha=1`);
+      src = `[${idx}:v]setpts=PTS-STARTPTS,${chain.join(',')},setpts=PTS+${num(start)}/TB`;
+      x = `'${animExpr(clip, 'x')}-overlay_w/2'`;
+      y = `'${animExpr(clip, 'y')}-overlay_h/2'`;
     }
+    graph.push(`${src}[${label}]`);
+    const out = `o${layer}`;
+    graph.push(`[${last}][${label}]overlay=x=${x}:y=${y}:eval=frame:eof_action=pass:enable='between(t,${num(start)},${num(end)})'[${out}]`);
+    last = out;
   }
   graph.push(`[${last}]format=yuv420p[vout]`);
 
@@ -161,7 +189,7 @@ export function startExport(opts: {
   project: Project;
   mediaDir: string;
   jobDir: string;
-  textRenders: Record<string, string>;
+  gfx: Record<number, string>;
   options: ExportOptions;
 }): ExportJob {
   const { inputs, graph, total, fps } = buildFfmpegGraph(opts);

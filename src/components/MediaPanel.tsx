@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { AlertCircle, Download, FileText, Film, FolderOpen, Image as ImageIcon, Loader2, Music, Plus, Subtitles, Trash2, Type, Upload } from 'lucide-react';
+import { AlertCircle, Circle, Download, Square, FileText, Film, FolderOpen, Image as ImageIcon, Loader2, Music, Plus, Subtitles, Trash2, Type, Upload } from 'lucide-react';
 import type { Asset, TextClip } from '../../shared/types';
 import { clipEnd } from '../../shared/types';
 import { parseSubtitles, toSrt } from '../lib/srt';
@@ -210,6 +210,15 @@ function TextTab() {
             <span style={p.preview}>{p.text}</span>
           </div>
         ))}
+      </div>
+      <div className="panel-title" style={{ marginTop: 16 }}>Formas</div>
+      <div className="btn-row">
+        <button className="btn" title="Añadir un rectángulo en el cabezal" onClick={() => useEditor.getState().addShapeClip('rect')}>
+          <Square size={14} /> Rectángulo
+        </button>
+        <button className="btn" title="Añadir una elipse en el cabezal" onClick={() => useEditor.getState().addShapeClip('ellipse')}>
+          <Circle size={14} /> Elipse
+        </button>
       </div>
     </>
   );
